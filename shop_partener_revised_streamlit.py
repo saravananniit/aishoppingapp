@@ -26,7 +26,7 @@ def setup_agent():
             "Format the recommendations neatly and ensure clarity for ease of user understanding.",
         ],
         tools=[SerperTools()],
-        show_tool_calls=True,
+        # The 'show_tool_calls' parameter was removed here
     )
 
 # Function to extract structured info from response
@@ -78,9 +78,11 @@ with st.form("product_form"):
     col1, col2 = st.columns(2)
     with col1:
         category = st.text_input("Product Category", "Sports shoe")
-        color = st.text_input("Preferred Color", "Blue")
     with col2:
+        color = st.text_input("Preferred Color", "Blue")
+    with col1:
         purpose = st.text_input("Purpose", "Comfortable for long-distance running")
+    with col2:
         budget = st.text_input("Max Budget (INR)", "10000")
 
     submitted = st.form_submit_button("🔍 Get Recommendations")
