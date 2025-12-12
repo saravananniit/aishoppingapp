@@ -1,3 +1,19 @@
+"""
+AI Shopping Assistant (Streamlit)
+
+This module implements a Streamlit web app that:
+- Accepts user shopping preferences via a form
+- Uses an LLM-powered agent + web search tooling to fetch product recommendations
+- Attempts to parse the agent response into a structured table
+- Optionally exports the table as a Word document (.docx)
+
+Environment variables
+---------------------
+- SERPER_API_KEY: required by `agno.tools.serper.SerperTools` for web search.
+- OPENAI_API_KEY (or equivalent): required by `agno.models.openai.OpenAIChat`.
+  The exact variable name depends on your OpenAI/Agno configuration.
+"""
+
 import streamlit as st
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
@@ -12,7 +28,22 @@ from io import BytesIO
 load_dotenv()
 
 @st.cache_resource
-def setup_agent():
+def setup_agent() -> Agent:
+    """
+    Create (and cache) the recommendation agent.
+
+    The agent uses:
+    - `OpenAIChat(id="gpt-4o")` as its model
+    - `SerperTools()` for real-time web search
+
+    Streamlit caches this resource so repeated runs (e.g., widget updates) don't
+    recreate the agent unnecessarily.
+
+    Returns
+    -------
+    Agent
+        Configured Agno `Agent` instance.
+    """
     return Agent(
         name="shopping partner",
         model=OpenAIChat(id="gpt-4o"),
@@ -30,7 +61,30 @@ def setup_agent():
     )
 
 # Function to extract structured info from response
-def parse_response_to_table(response_text: str):
+def parse_response_to_table(response_text: str) -> pd.DataFrame:
+    """
+    Parse a recommendation text response into a structured table.
+
+    This parser expects the agent response to follow a specific pattern for each
+    product, for example:
+
+        1. Product title
+           - Price: ₹12,345
+           - Fabric: Some fabric
+           - Features: Some features
+           - Link: [View on Amazon](https://example.com/item)
+
+    Parameters
+    ----------
+    response_text:
+        Full text produced by the agent (ideally after any markdown cleanup).
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with columns: Product, Price (₹), Fabric, Features, Store, Link.
+        If no matches are found, the DataFrame will be empty.
+    """
     pattern = r"\d+\.\s(.+?)\n\s*- Price: ₹([\d,\.]+)\n\s*- Fabric: (.+?)\n\s*- Features: (.+?)\n\s*- Link: \[View on (.+?)\]\((https?://[^\)]+)\)"
     matches = re.findall(pattern, response_text)
 
@@ -49,7 +103,24 @@ def parse_response_to_table(response_text: str):
     return pd.DataFrame(data)
 
 # DOCX export
-def generate_docx_from_df(df):
+def generate_docx_from_df(df: pd.DataFrame) -> BytesIO:
+    """
+    Generate a Word document (.docx) containing the provided DataFrame.
+
+    The document includes a heading and a table (Table Grid style) containing
+    the DataFrame's columns and values.
+
+    Parameters
+    ----------
+    df:
+        DataFrame to export.
+
+    Returns
+    -------
+    io.BytesIO
+        In-memory buffer positioned at the beginning, ready to be passed to
+        Streamlit's `st.download_button`.
+    """
     doc = Document()
     doc.add_heading('Product Recommendations', 0)
     table = doc.add_table(rows=1, cols=len(df.columns))
