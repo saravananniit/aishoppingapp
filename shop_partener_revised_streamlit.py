@@ -15,20 +15,26 @@ Environment variables
 """
 
 import streamlit as st
-from agno.agent import Agent
-from agno.models.openai import OpenAIChat
-from agno.tools.serper import SerperTools
 from dotenv import load_dotenv
-import pandas as pd
 import re
-from docx import Document
 from io import BytesIO
+from typing import Any, Dict, List, Mapping, Sequence
 
 # Load environment variables (SERPER_API_KEY required)
 load_dotenv()
 
+PRODUCT_PATTERN = re.compile(
+    r"\d+\.\s(.+?)\n"
+    r"\s*-\s*Price:\s*₹([\d,\.]+)\n"
+    r"\s*-\s*Fabric:\s*(.+?)\n"
+    r"\s*-\s*Features:\s*(.+?)\n"
+    r"\s*-\s*Link:\s*\[View on (.+?)\]\((https?://[^\)]+)\)",
+    flags=re.MULTILINE,
+)
+
+
 @st.cache_resource
-def setup_agent() -> Agent:
+def setup_agent() -> Any:
     """
     Create (and cache) the recommendation agent.
 
@@ -41,9 +47,14 @@ def setup_agent() -> Agent:
 
     Returns
     -------
-    Agent
+    Any
         Configured Agno `Agent` instance.
     """
+    # Import lazily to reduce initial app load time (only needed after user submits).
+    from agno.agent import Agent
+    from agno.models.openai import OpenAIChat
+    from agno.tools.serper import SerperTools
+
     return Agent(
         name="shopping partner",
         model=OpenAIChat(id="gpt-4o"),
@@ -61,9 +72,9 @@ def setup_agent() -> Agent:
     )
 
 # Function to extract structured info from response
-def parse_response_to_table(response_text: str) -> pd.DataFrame:
+def parse_response_to_rows(response_text: str) -> List[Dict[str, str]]:
     """
-    Parse a recommendation text response into a structured table.
+    Parse a recommendation text response into structured rows.
 
     This parser expects the agent response to follow a specific pattern for each
     product, for example:
@@ -81,17 +92,16 @@ def parse_response_to_table(response_text: str) -> pd.DataFrame:
 
     Returns
     -------
-    pandas.DataFrame
-        DataFrame with columns: Product, Price (₹), Fabric, Features, Store, Link.
-        If no matches are found, the DataFrame will be empty.
+    list[dict[str, str]]
+        Rows with keys: Product, Price (₹), Fabric, Features, Store, Link.
+        If no matches are found, the list will be empty.
     """
-    pattern = r"\d+\.\s(.+?)\n\s*- Price: ₹([\d,\.]+)\n\s*- Fabric: (.+?)\n\s*- Features: (.+?)\n\s*- Link: \[View on (.+?)\]\((https?://[^\)]+)\)"
-    matches = re.findall(pattern, response_text)
+    matches = PRODUCT_PATTERN.findall(response_text)
 
-    data = []
+    rows: List[Dict[str, str]] = []
     for match in matches:
         title, price, fabric, features, site, link = match
-        data.append({
+        rows.append({
             "Product": title.strip(),
             "Price (₹)": price.strip(),
             "Fabric": fabric.strip(),
@@ -100,50 +110,82 @@ def parse_response_to_table(response_text: str) -> pd.DataFrame:
             "Link": link.strip()
         })
 
-    return pd.DataFrame(data)
+    return rows
 
 # DOCX export
-def generate_docx_from_df(df: pd.DataFrame) -> BytesIO:
+@st.cache_data(show_spinner=False, max_entries=128)
+def generate_docx_bytes_from_rows(
+    rows: Sequence[Mapping[str, Any]],
+    columns: Sequence[str],
+) -> bytes:
     """
-    Generate a Word document (.docx) containing the provided DataFrame.
+    Generate a Word document (.docx) containing the provided tabular data.
 
     The document includes a heading and a table (Table Grid style) containing
-    the DataFrame's columns and values.
+    the provided columns and values.
 
     Parameters
     ----------
-    df:
-        DataFrame to export.
+    rows:
+        Row mappings to export (e.g., list of dicts).
+    columns:
+        Column order to use in the document.
 
     Returns
     -------
-    io.BytesIO
-        In-memory buffer positioned at the beginning, ready to be passed to
-        Streamlit's `st.download_button`.
+    bytes
+        DOCX bytes suitable for passing to Streamlit's `st.download_button`.
     """
+    # Import lazily to reduce initial app load time (only needed when exporting).
+    from docx import Document
+
     doc = Document()
     doc.add_heading('Product Recommendations', 0)
-    table = doc.add_table(rows=1, cols=len(df.columns))
+    table = doc.add_table(rows=1, cols=len(columns))
     table.style = 'Table Grid'
 
     hdr_cells = table.rows[0].cells
-    for i, column in enumerate(df.columns):
+    for i, column in enumerate(columns):
         hdr_cells[i].text = column
 
-    for _, row in df.iterrows():
+    for row in rows:
         cells = table.add_row().cells
-        for i, cell in enumerate(row):
-            cells[i].text = str(cell)
+        for i, column in enumerate(columns):
+            cells[i].text = str(row.get(column, ""))
 
     buffer = BytesIO()
     doc.save(buffer)
-    buffer.seek(0)
-    return buffer
+    return buffer.getvalue()
+
+
+def clean_markdown_bold(text: str) -> str:
+    """Remove markdown bold markers (**...**) without changing content."""
+    return re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
+def run_recommendation_query(query: str) -> str:
+    """
+    Run the (network-bound) recommendation query and cache results.
+
+    Caching dramatically improves UX on Streamlit reruns (e.g., clicking Download)
+    and reduces repeated LLM/search calls for identical queries.
+    """
+    agent = setup_agent()
+    result = agent.run(query)
+    return result.content if hasattr(result, "content") else str(result)
 
 # --- UI ---
 st.set_page_config(page_title="🛍️ AI Shopping Assistant", layout="centered")
 st.title("🛍️ AI Shopping Assistant")
 st.markdown("Find the best products that match your preferences using AI and real-time web search.")
+
+if "recommendations_query" not in st.session_state:
+    st.session_state.recommendations_query = ""
+if "recommendations_text" not in st.session_state:
+    st.session_state.recommendations_text = ""
+if "recommendations_rows" not in st.session_state:
+    st.session_state.recommendations_rows = []
 
 with st.form("product_form"):
     col1, col2 = st.columns(2)
@@ -154,39 +196,49 @@ with st.form("product_form"):
     with col1:
         purpose = st.text_input("Purpose", "Comfortable for long-distance running")
     with col2:
-        budget = st.text_input("Max Budget (INR)", "10000")
+        budget = st.number_input("Max Budget (INR)", min_value=0, value=10000, step=500)
 
     submitted = st.form_submit_button("🔍 Get Recommendations")
 
 if submitted:
     with st.spinner("Searching and analyzing..."):
-        agent = setup_agent()
         query = (
             f"I am looking for {category} with the following preferences: "
             f"Color: {color}, Purpose: {purpose}, Budget: Under Rs. {budget}"
         )
-        result = agent.run(query)
-        raw_text = result.content if hasattr(result, 'content') else str(result)
+        try:
+            raw_text = run_recommendation_query(query)
+        except Exception as e:
+            st.error("Recommendation request failed. Please try again.")
+            st.exception(e)
+            st.stop()
 
-        # Clean markdown-style bold text
-        cleaned_text = re.sub(r"\*\*(.*?)\*\*", r"\1", raw_text)
+        cleaned_text = clean_markdown_bold(raw_text)
 
-        # Try structured parsing
-        df = parse_response_to_table(cleaned_text)
+        rows = parse_response_to_rows(cleaned_text)
 
-    st.subheader("📋 Recommended Products")
-    if not df.empty:
-        st.dataframe(df, use_container_width=True)
+        st.session_state.recommendations_query = query
+        st.session_state.recommendations_text = cleaned_text
+        st.session_state.recommendations_rows = rows
 
-        docx_file = generate_docx_from_df(df)
-        st.download_button(
-            label="📥 Download as Word Document",
-            data=docx_file,
-            file_name="product_recommendations.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+st.subheader("📋 Recommended Products")
+
+rows = st.session_state.recommendations_rows
+text = st.session_state.recommendations_text
+if rows:
+    st.dataframe(rows, use_container_width=True)
+
+    columns = ["Product", "Price (₹)", "Fabric", "Features", "Store", "Link"]
+    docx_bytes = generate_docx_bytes_from_rows(rows=rows, columns=columns)
+    st.download_button(
+        label="📥 Download as Word Document",
+        data=docx_bytes,
+        file_name="product_recommendations.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+elif text:
+    # If parsing fails but the model produced useful prose, show it (persisted across reruns).
+    if any(keyword in text.lower() for keyword in ["here are some", "options", "suitable"]):
+        st.markdown(text)
     else:
-        if any(keyword in cleaned_text.lower() for keyword in ["here are some", "options", "suitable"]):
-            st.markdown(cleaned_text)
-        else:
-            st.info("No product recommendations were found.")
+        st.info("No product recommendations were found.")
